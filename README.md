@@ -13,8 +13,16 @@ This is a separate project in `E:\Connore-Simple`. The original version remains
 in `E:\Connore` on port 8080. Both use the same local MySQL database, so profile,
 interest and connection changes appear in both. They use separate session
 cookies so logging in to one version does not log you out of the other.
-The existing database credentials and JDBC driver have been copied locally;
-you can launch this copy with `start-local.bat`.
+The original local copy already has its database credentials and JDBC driver.
+Fresh clones need their own `.env` settings and Connector/J JAR, as described
+below. Launch the configured project with `start-local.bat`.
+
+## Sharing with the group
+
+The GitHub repository shares the source code. The website needs the Java server
+and MySQL running. A temporary Cloudflare HTTPS link can share the running local
+website with the group; the laptop, Java server, MySQL and tunnel must stay
+running. Restarting the temporary tunnel gives it a new link.
 
 ## Run locally
 
