@@ -16,6 +16,8 @@
   let writing = false;
   let loading = true;
   let renderVersion = 0;
+  let accountLoadVersion = 0;
+  let navigationVersion = 0;
   let notice = '';
   let errorText = '';
   const searches = {people: '', communities: '', interests: ''};
@@ -52,8 +54,7 @@
 
   function handleError(error) {
     if (error.status === 401 && error.code !== 'BAD_CREDENTIALS') {
-      state = emptyState();
-      profileDraft = null;
+      clearAccount();
       location.hash = 'login';
       render();
       showMessage('', 'Your session has ended. Log in to continue.');
@@ -62,30 +63,58 @@
     showMessage('', messages[error.code || error.message] || 'Could not complete the request. Please try again.');
   }
 
-  async function loadAccount() {
-    const session = await Api.call('GET', '/session');
-    const categories = await Api.call('GET', '/interests');
-    if (!session.hasProfile) {
-      state = {...emptyState(), session, categories};
-      return;
+  function clearAccount() {
+    accountLoadVersion++;
+    navigationVersion++;
+    state = emptyState();
+    profileDraft = null;
+    searches.people = searches.communities = searches.interests = '';
+  }
+
+  function commitAccount(next, version) {
+    if (version !== accountLoadVersion) return false;
+    if (state.session?.studentId !== next.session.studentId) {
+      profileDraft = null;
+      searches.people = searches.communities = searches.interests = '';
     }
-    const [profile, interestIds, links, matches, communities, incoming, outgoing, accepted] = await Promise.all([
-      Api.call('GET', '/profile'), Api.call('GET', '/profile/interests'),
-      Api.call('GET', '/profile/social-links'), Api.call('GET', '/matches?limit=30'),
-      Api.call('GET', '/communities'), Api.call('GET', '/connections?view=incoming'),
-      Api.call('GET', '/connections?view=outgoing'), Api.call('GET', '/connections?view=accepted')
-    ]);
-    state = {session, profile, categories, interestIds, links, matches, communities, incoming, outgoing, accepted, members: {}};
+    state = next;
+    return true;
+  }
+
+  async function loadAccount() {
+    const version = ++accountLoadVersion;
+    try {
+      const session = await Api.call('GET', '/session');
+      const categories = await Api.call('GET', '/interests');
+      if (!session.hasProfile) return commitAccount({...emptyState(), session, categories}, version);
+      const [profile, interestIds, links, matches, communities, incoming, outgoing, accepted] = await Promise.all([
+        Api.call('GET', '/profile'), Api.call('GET', '/profile/interests'),
+        Api.call('GET', '/profile/social-links'), Api.call('GET', '/matches?limit=30'),
+        Api.call('GET', '/communities'), Api.call('GET', '/connections?view=incoming'),
+        Api.call('GET', '/connections?view=outgoing'), Api.call('GET', '/connections?view=accepted')
+      ]);
+      return commitAccount({session, profile, categories, interestIds, links, matches, communities, incoming, outgoing, accepted, members: {}}, version);
+    } catch (error) {
+      if (version !== accountLoadVersion) return false;
+      throw error;
+    }
   }
 
   function captureDraft() {
     const form = document.getElementById('profile-form');
-    if (form) profileDraft = formValues(form);
+    if (form) {
+      const values = formValues(form);
+      profileDraft = writing || profileHasChanges(values) ? values : null;
+    }
+  }
+
+  function profileHasChanges(values) {
+    return ['fullName', 'department', 'yearOfStudy', 'bio'].some(key => String(values[key] || '') !== String(state.profile?.[key] || ''));
   }
 
   async function refreshAfterWrite(message) {
     try {
-      await loadAccount();
+      if (!await loadAccount()) return;
       render();
       showMessage(message);
     } catch (error) {
@@ -161,7 +190,7 @@
   function connectionControls(person, contextInterest) {
     if (person.studentId === state.session.studentId) return '<span class="muted">You</span>';
     if (state.accepted.some(connection => connection.studentId === person.studentId)) return '<span class="muted">Connected</span>';
-    if (state.outgoing.some(connection => connection.studentId === person.studentId)) return '<span class="muted">Request sent</span>';
+    if (state.outgoing.some(connection => connection.studentId === person.studentId && connection.status === 'PENDING')) return '<span class="muted">Request sent</span>';
     if (state.incoming.some(connection => connection.studentId === person.studentId)) return '<a href="#requests">Review incoming request</a>';
     return `<button type="button" data-action="connect" data-id="${person.studentId}" data-interest="${contextInterest || ''}">Send request</button>`;
   }
@@ -221,7 +250,15 @@
   }
 
   function requestSection(title, people, view) {
-    return `<section><h2>${title}</h2>${people.length ? `<div class="list">${people.map(person => `<article class="person">${personDetails(person)}${view === 'accepted' ? `<p>Shared handles: ${(person.socialLinks || []).length ? person.socialLinks.map(link => `${escapeHtml(link.platform)}: ${escapeHtml(link.handle)}`).join('; ') : 'None shared.'}</p>` : ''}<div class="actions">${view === 'incoming' ? `<button type="button" data-action="accept" data-id="${person.connectionId}">Accept</button><button type="button" data-action="decline" data-id="${person.connectionId}">Decline</button>` : view === 'outgoing' ? '<span class="muted">Awaiting reply</span>' : ''}<button type="button" data-action="block" data-id="${person.connectionId}">Block student</button></div></article>`).join('')}</div>` : `<p>${view === 'accepted' ? 'No connections yet.' : 'No requests.'}</p>`}</section>`;
+    return `<section><h2>${title}</h2>${people.length ? `<div class="list">${people.map(person => `<article class="person">${personDetails(person)}${view === 'accepted' ? `<p>Shared handles: ${(person.socialLinks || []).length ? person.socialLinks.map(link => `${escapeHtml(link.platform)}: ${escapeHtml(link.handle)}`).join('; ') : 'None shared.'}</p>` : ''}<div class="actions">${requestActions(person, view)}</div></article>`).join('')}</div>` : `<p>${view === 'accepted' ? 'No connections yet.' : 'No requests.'}</p>`}</section>`;
+  }
+
+  function requestActions(person, view) {
+    if (view === 'outgoing' && person.status === 'CLOSED') {
+      const interest = state.categories.some(category => category.interests.some(item => item.interestId === person.contextInterestId)) ? person.contextInterestId : null;
+      return `<span class="muted">Request closed</span>${connectionControls(person, interest)}`;
+    }
+    return `${view === 'incoming' ? `<button type="button" data-action="accept" data-id="${person.connectionId}">Accept</button><button type="button" data-action="decline" data-id="${person.connectionId}">Decline</button>` : view === 'outgoing' ? '<span class="muted">Awaiting reply</span>' : ''}<button type="button" data-action="block" data-id="${person.connectionId}">Block student</button>`;
   }
 
   function requestsPage() {
@@ -268,7 +305,7 @@
     const status = document.getElementById('profile-save-status');
     if (!form || !status) return;
     const values = formValues(form);
-    const changed = ['fullName', 'department', 'yearOfStudy', 'bio'].some(key => String(values[key] || '') !== String(state.profile?.[key] || ''));
+    const changed = profileHasChanges(values);
     status.textContent = changed ? 'Unsaved profile changes.' : state.profile ? 'Saved.' : '';
   }
 
@@ -321,9 +358,7 @@
     await performWrite(button, async () => {
       if (action === 'logout') {
         await Api.call('POST', '/auth/logout', {});
-        state = emptyState();
-        profileDraft = null;
-        searches.people = searches.communities = searches.interests = '';
+        clearAccount();
         location.hash = 'login';
         render();
         showMessage('Logged out.');
@@ -360,7 +395,7 @@
           render();
           showMessage('Account created. Log in to set up your profile.');
         } else {
-          await loadAccount();
+          if (!await loadAccount()) return;
           location.hash = state.profile ? 'people' : 'profile';
           render();
           showMessage('Logged in.');
@@ -387,21 +422,36 @@
     });
   });
 
-  window.addEventListener('hashchange', () => {
+  window.addEventListener('hashchange', async () => {
+    const version = ++navigationVersion;
     captureDraft();
-    render();
+    if (!state.session || !state.profile || writing) {
+      render();
+      return;
+    }
+    // Fetch other students' changes when visiting a page. Keep unsaved profile text.
+    renderVersion++;
+    document.getElementById('page').innerHTML = '<p role="status">Loading…</p>';
+    try {
+      if (!await loadAccount() || version !== navigationVersion) return;
+      render();
+    } catch (error) {
+      if (version !== navigationVersion) return;
+      render();
+      handleError(error);
+    }
   });
 
   async function boot() {
     render();
     try {
-      await loadAccount();
+      if (!await loadAccount()) return;
       loading = false;
       render();
     } catch (error) {
       loading = false;
       if (error.status === 401) {
-        state = emptyState();
+        clearAccount();
         render();
       } else {
         app.innerHTML = '<main class="content"><h1>Connore</h1><p>Could not load Connore. Check that the server and database are running, then reload this page.</p></main>';

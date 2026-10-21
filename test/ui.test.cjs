@@ -84,8 +84,12 @@ async function setup({signedIn = false, hasProfile = false, collegeDomain = 'sit
     fetch: async (path, options) => {
       const method = options.method, body = options.body ? JSON.parse(options.body) : undefined;
       const request = {path, method, body, options}; requests.push(request);
-      const blocked = pending.find(item => item.path === path && item.method === method);
-      if (blocked) await blocked.promise;
+      const blocked = pending.find(item => item.path === path && item.method === method && (!item.once || !item.used));
+      if (blocked) {
+        blocked.used = true;
+        await blocked.promise;
+        if (Object.hasOwn(blocked, 'data')) return reply(blocked.status || 200, blocked.data);
+      }
       const failureIndex = failures.findIndex(item => item.path === path && (!item.method || item.method === method));
       if (failureIndex >= 0) { const failure = failures.splice(failureIndex, 1)[0]; if (failure.network) throw new TypeError('Network unavailable'); return reply(failure.status || 400, {error: failure.error || 'REQUEST_FAILED'}); }
       if (Object.hasOwn(responses, path)) return reply(200, responses[path]);
@@ -128,6 +132,7 @@ async function setup({signedIn = false, hasProfile = false, collegeDomain = 'sit
     async input(id, value) { const input = getElementById(id); assert.ok(input, id + ' is rendered'); input.value = value; await dispatch('input', input); },
     fail(path, options = {}) { failures.push({path, ...options}); },
     hold(method, path) { let release; const promise = new Promise(resolve => { release = resolve; }); const item = {method, path, promise}; pending.push(item); return () => { pending.splice(pending.indexOf(item), 1); release(); }; },
+    holdNext(method, path, data, status = 200) { let release; const promise = new Promise(resolve => { release = resolve; }); const item = {method, path, promise, data, status, once: true}; pending.push(item); return () => { pending.splice(pending.indexOf(item), 1); release(); }; },
     startClick(action, id) { const button = node('button', {'data-action': action, 'data-id': String(id)}); return {button, promise: dispatch('click', button)}; }
   };
 }
@@ -252,6 +257,164 @@ test('requests expose accept, decline, block and opted-in connection handles', a
   const responses = ui.requests.filter(request => request.path === '/api/connections/31/respond');
   assert.deepEqual(responses.map(request => request.body), [{accept: true}, {accept: false}]);
   assert.ok(ui.requests.some(request => request.path === '/api/connections/31/block' && request.method === 'POST'));
+});
+
+test('closed requests show a neutral status and let the sender request again', async () => {
+  const closed = {...member, connectionId: 32, status: 'CLOSED', contextInterestId: 11};
+  const ui = await setup({signedIn: true, hasProfile: true, responses: {
+    '/api/connections?view=incoming': [], '/api/connections?view=accepted': [],
+    '/api/connections?view=outgoing': [closed]
+  }});
+  assert.match(ui.element('people-list').innerHTML, /Send request/);
+  assert.doesNotMatch(ui.element('people-list').innerHTML, /Request sent/);
+  await ui.go('requests');
+  assert.match(ui.page.innerHTML, /Request closed/);
+  assert.doesNotMatch(ui.page.innerHTML, /Awaiting reply|data-action="block"|declined|expired/i);
+  assert.match(ui.page.innerHTML, /data-action="connect" data-id="42" data-interest="11"/);
+  await ui.click('connect', 42, {interest: '11'});
+  assert.deepEqual(ui.requests.find(request => request.path === '/api/connections' && request.method === 'POST').body, {toStudentId: 42, interestId: 11});
+});
+
+test('requesting again drops an inactive historical context interest', async () => {
+  const ui = await setup({signedIn: true, hasProfile: true, responses: {
+    '/api/connections?view=incoming': [], '/api/connections?view=accepted': [],
+    '/api/connections?view=outgoing': [{...member, connectionId: 32, status: 'CLOSED', contextInterestId: 999}]
+  }});
+  await ui.go('requests');
+  assert.match(ui.page.innerHTML, /data-action="connect" data-id="42" data-interest=""/);
+  await ui.click('connect', 42);
+  assert.deepEqual(ui.requests.find(request => request.path === '/api/connections' && request.method === 'POST').body, {toStudentId: 42, interestId: null});
+});
+
+test('visiting Requests fetches a request sent by another account', async () => {
+  const responses = {'/api/connections?view=incoming': [], '/api/connections?view=outgoing': [], '/api/connections?view=accepted': []};
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  responses['/api/connections?view=incoming'] = [{...member, connectionId: 33, status: 'PENDING'}];
+  await ui.go('requests');
+  assert.match(ui.page.innerHTML, /Test Student/);
+  assert.match(ui.page.innerHTML, /data-action="accept" data-id="33"/);
+});
+
+test('navigation shows external acceptance and removes a revoked shared handle', async () => {
+  const responses = {
+    '/api/connections?view=incoming': [{...member, connectionId: 33, status: 'PENDING'}],
+    '/api/connections?view=outgoing': [], '/api/connections?view=accepted': []
+  };
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  responses['/api/connections?view=incoming'] = [];
+  responses['/api/connections?view=accepted'] = [{...connection, socialLinks: [{platform: 'GitHub', handle: 'revocable-handle'}]}];
+  await ui.go('requests');
+  assert.match(ui.page.innerHTML, /revocable-handle/);
+  assert.doesNotMatch(ui.page.innerHTML, /data-action="accept"/);
+  responses['/api/connections?view=accepted'] = [{...connection, socialLinks: []}];
+  await ui.go('people');
+  await ui.go('requests');
+  assert.doesNotMatch(ui.page.innerHTML, /revocable-handle/);
+  assert.match(ui.page.innerHTML, /None shared/);
+});
+
+test('community members refresh after another account joins', async () => {
+  const responses = {'/api/communities/21/members': [member]};
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  await ui.go('community/21');
+  assert.doesNotMatch(ui.page.innerHTML, /Newly Joined Student/);
+  responses['/api/communities/21/members'] = [member, {...member, studentId: 44, fullName: 'Newly Joined Student'}];
+  await ui.go('people');
+  await ui.go('community/21');
+  assert.match(ui.page.innerHTML, /Newly Joined Student/);
+});
+
+test('refreshing navigation preserves the current account introduction draft', async () => {
+  const ui = await setup({signedIn: true, hasProfile: true});
+  await ui.go('profile');
+  await ui.input('bio', 'An unsaved draft that must survive refresh.');
+  await ui.go('people');
+  await ui.go('profile');
+  assert.equal(ui.element('profile-form').elements.bio.value, 'An unsaved draft that must survive refresh.');
+  assert.match(ui.element('profile-save-status').textContent, /Unsaved/);
+  assert.ok(!ui.requests.some(request => request.path === '/api/profile' && request.method === 'PUT'));
+});
+
+test('unchanged profile fields do not mask newer saved data after a refresh', async () => {
+  const responses = {'/api/profile': {studentId: 41, fullName: 'Original Name', bio: '', interests: []}};
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  await ui.go('profile');
+  responses['/api/profile'] = {studentId: 41, fullName: 'Updated Name', bio: 'Updated elsewhere', interests: []};
+  await ui.go('people');
+  await ui.go('profile');
+  assert.equal(ui.element('profile-form').elements.fullName.value, 'Updated Name');
+  assert.equal(ui.element('profile-form').elements.bio.value, 'Updated elsewhere');
+  assert.equal(ui.element('profile-save-status').textContent, 'Saved.');
+});
+
+test('edits made while saving a profile remain unsaved after that request finishes', async () => {
+  const ui = await setup({signedIn: true, hasProfile: true});
+  await ui.go('profile');
+  const release = ui.hold('PUT', '/api/profile');
+  const saving = ui.submit('profile-form', {bio: 'Submitted bio'});
+  await ui.settle();
+  await ui.input('bio', '');
+  release(); await saving;
+  assert.equal(ui.element('profile-form').elements.bio.value, '');
+  assert.match(ui.element('profile-save-status').textContent, /Unsaved/);
+});
+
+test('an older navigation response cannot overwrite a newer page result', async () => {
+  const responses = {'/api/connections?view=incoming': [], '/api/connections?view=outgoing': [], '/api/connections?view=accepted': []};
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  const release = ui.holdNext('GET', '/api/connections?view=incoming', [{...member, fullName: 'Stale Student', connectionId: 34, status: 'PENDING'}]);
+  const oldNavigation = ui.go('requests');
+  await ui.settle();
+  assert.match(ui.page.innerHTML, /Loading/);
+  responses['/api/connections?view=incoming'] = [{...member, fullName: 'Current Student', connectionId: 35, status: 'PENDING'}];
+  await ui.go('people');
+  await ui.go('requests');
+  assert.match(ui.page.innerHTML, /Current Student/);
+  release(); await oldNavigation;
+  assert.match(ui.page.innerHTML, /Current Student/);
+  assert.doesNotMatch(ui.page.innerHTML, /Stale Student/);
+});
+
+test('logout prevents a pending account load from restoring the old session', async () => {
+  const ui = await setup({signedIn: true, hasProfile: true});
+  const release = ui.holdNext('GET', '/api/profile', {studentId: 41, fullName: 'Stale Private Student', bio: 'Do not restore this account', interests: []});
+  const oldNavigation = ui.go('requests');
+  await ui.settle();
+  await ui.click('logout');
+  release(); await oldNavigation;
+  assert.match(ui.page.innerHTML, /id="auth-form"/);
+  assert.doesNotMatch(ui.markup, /Stale Private Student|Do not restore this account/);
+  const sessionReads = ui.requests.filter(request => request.path === '/api/session').length;
+  await ui.go('profile');
+  assert.equal(ui.requests.filter(request => request.path === '/api/session').length, sessionReads);
+  assert.equal(ui.context.location.hash, '#login');
+});
+
+test('a stale failed request cannot log out a newer valid page load', async () => {
+  const ui = await setup({signedIn: true, hasProfile: true});
+  const release = ui.holdNext('GET', '/api/session', {error: 'UNAUTHENTICATED'}, 401);
+  const oldNavigation = ui.go('requests');
+  await ui.settle();
+  await ui.go('people');
+  release(); await oldNavigation;
+  assert.equal(ui.context.location.hash, '#people');
+  assert.match(ui.page.innerHTML, /<h1>People<\/h1>/);
+  assert.doesNotMatch(ui.markup, /id="auth-form"/);
+});
+
+test('an externally changed session never inherits another account profile draft', async () => {
+  const firstProfile = {studentId: 41, fullName: 'First Account', bio: 'Saved first bio', interests: []};
+  const responses = {'/api/session': {studentId: 41, hasProfile: true}, '/api/profile': firstProfile};
+  const ui = await setup({signedIn: true, hasProfile: true, responses});
+  await ui.go('profile');
+  await ui.input('bio', 'Private unsaved text belonging only to the first account.');
+  responses['/api/session'] = {studentId: 52, hasProfile: true};
+  responses['/api/profile'] = {studentId: 52, fullName: 'Second Account', bio: 'Second account bio', interests: []};
+  await ui.go('people');
+  await ui.go('profile');
+  assert.equal(ui.element('profile-form').elements.fullName.value, 'Second Account');
+  assert.equal(ui.element('profile-form').elements.bio.value, 'Second account bio');
+  assert.doesNotMatch(ui.markup, /Private unsaved text belonging/);
 });
 
 test('cancelling the block confirmation sends no database request', async () => {
