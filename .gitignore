@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+config.properties
+test-db.properties
+*.local.properties
+
+# Generated output and private artifacts
+out/
+tmp/
+output/
+versions/
+archive/
+*.class
+*.log
+*.war
+*.zip
+*.tar.gz
+
+# Locally supplied dependencies
+lib/*.jar
+
+# Editor and operating system files
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+node_modules/

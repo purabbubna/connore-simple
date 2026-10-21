@@ -1,0 +1,95 @@
+erDiagram
+    ACCOUNT ||--o| STUDENT_PROFILE : has
+    STUDENT_PROFILE ||--o{ SOCIAL_LINK : shares
+    CATEGORY ||--o{ INTEREST : groups
+    STUDENT_PROFILE ||--o{ STUDENT_INTEREST : lists
+    INTEREST ||--o{ STUDENT_INTEREST : chosen_as
+    INTEREST ||--o| COMMUNITY : has
+    STUDENT_PROFILE ||--o{ COMMUNITY_MEMBERSHIP : joins
+    COMMUNITY ||--o{ COMMUNITY_MEMBERSHIP : has
+    STUDENT_PROFILE ||--o{ CONNECTION : sends
+    STUDENT_PROFILE ||--o{ CONNECTION : receives
+    INTEREST |o--o{ CONNECTION : context_of
+    CONNECTION ||--o| PENDING_REQUEST : is
+    CONNECTION ||--o| ACCEPTED_CONNECTION : is
+    CONNECTION ||--o| CLOSED_REQUEST : is
+    CONNECTION ||--o| BLOCK : is
+    STUDENT_PROFILE ||--o{ BLOCK : blocked_by
+    ACCOUNT {
+        int account_id PK
+        string college_email UK
+        string password_hash
+        boolean email_verified
+datetime created_at
+    }
+    STUDENT_PROFILE {
+        int student_id PK "also FK to ACCOUNT"
+        string full_name
+        string department
+        int year_of_study
+        string bio
+        boolean show_department
+        boolean show_year
+        boolean suggestible
+    }
+    SOCIAL_LINK {
+        int link_id PK
+        int student_id FK
+        string platform
+        string handle
+        boolean shared
+    }
+    CATEGORY {
+        int category_id PK
+        string name UK
+    }
+    INTEREST {
+        int interest_id PK
+        string name UK
+        int category_id FK
+        boolean is_approved
+    }
+    STUDENT_INTEREST {
+        int student_id PK "also FK"
+        int interest_id PK "also FK"
+        datetime added_at
+    }
+    COMMUNITY {
+        int community_id PK
+        int interest_id FK "unique"
+        string description
+        datetime created_at
+    }
+    COMMUNITY_MEMBERSHIP {
+        int student_id PK "also FK"
+        int community_id PK "also FK"
+datetime joined_at
+    }
+    CONNECTION {
+        int connection_id PK
+        int requester_id FK
+        int receiver_id FK
+        int context_interest_id FK "optional"
+        string status "PENDING ACCEPTED CLOSED BLOCKED"
+        datetime created_at
+        int student_low_id "derived"
+        int student_high_id "derived"
+    }
+    PENDING_REQUEST {
+        int connection_id PK "also FK"
+        datetime expires_at
+    }
+    ACCEPTED_CONNECTION {
+        int connection_id PK "also FK"
+        datetime connected_at
+    }
+    CLOSED_REQUEST {
+        int connection_id PK "also FK"
+        string outcome "DECLINED or EXPIRED"
+        datetime closed_at
+    }
+    BLOCK {
+        int connection_id PK "also FK"
+        int blocked_by FK
+        datetime blocked_at
+    }

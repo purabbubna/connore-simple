@@ -1,0 +1,34 @@
+name: Connore checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Compile Java and tests
+        run: java Build.java test
+      - name: Check Java behavior and configuration
+        run: |
+          java -cp out ConfigTest
+          java -cp out CoreTest
+          java -cp out FilterTest
+          java -cp out CatalogTest
+      - name: Check the frontend
+        run: node --test test/ui.test.cjs
+      - name: Check tracked files
+        run: node scripts/check-repository.cjs
